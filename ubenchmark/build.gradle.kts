@@ -46,5 +46,6 @@ tasks.withType<JavaExec>().configureEach {
         // IntelliJ IDEA "execute main method" adds a JavaExec task, so we configure it
         classpath(File(buildDir, "jmh-generated-classes"))
         classpath(File(buildDir, "jmh-generated-resources"))
+        classpath(File(buildDir, "jmh-generated-sources"))
     }
 }
