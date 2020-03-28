@@ -16,13 +16,18 @@
  */
 package org.apache.calcite.util;
 
-import org.apache.calcite.linq4j.function.Parameter;
-
 import com.google.common.collect.ImmutableList;
 
+import org.apache.calcite.linq4j.function.Function;
+import org.apache.calcite.linq4j.function.Function1;
+import org.apache.calcite.linq4j.function.Parameter;
+
 import java.lang.annotation.Annotation;
+import java.lang.invoke.CallSite;
+import java.lang.invoke.LambdaMetafactory;
 import java.lang.invoke.MethodHandle;
-import java.lang.reflect.InvocationTargetException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -30,11 +35,12 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiFunction;
 
 /**
  * Static utilities for Java reflection.
  */
-public abstract class ReflectUtilOrigin {
+public abstract class ReflectUtilUsingLambdaFactory {
   //~ Static fields/initializers ---------------------------------------------
 
   private static Map<Class, Class> primitiveToBoxingMap;
@@ -186,91 +192,6 @@ public abstract class ReflectUtilOrigin {
   }
 
   /**
-   * Implements the {@link org.apache.calcite.util.Glossary#VISITOR_PATTERN} via
-   * reflection. The basic technique is taken from <a
-   * href="http://www.javaworld.com/javaworld/javatips/jw-javatip98.html">a
-   * Javaworld article</a>. For an example of how to use it, see
-   * {@code ReflectVisitorTest}.
-   *
-   * <p>Visit method lookup follows the same rules as if
-   * compile-time resolution for VisitorClass.visit(VisiteeClass) were
-   * performed. An ambiguous match due to multiple interface inheritance
-   * results in an IllegalArgumentException. A non-match is indicated by
-   * returning false.
-   *
-   * @param visitor         object whose visit method is to be invoked
-   * @param visitee         object to be passed as a parameter to the visit
-   *                        method
-   * @param hierarchyRoot   if non-null, visitor method will only be invoked if
-   *                        it takes a parameter whose type is a subtype of
-   *                        hierarchyRoot
-   * @param visitMethodName name of visit method, e.g. "visit"
-   * @return true if a matching visit method was found and invoked
-   */
-  public static boolean invokeVisitor(
-      ReflectiveVisitor visitor,
-      Object visitee,
-      Class hierarchyRoot,
-      String visitMethodName) {
-    return invokeVisitorInternal(
-        visitor,
-        visitee,
-        hierarchyRoot,
-        visitMethodName);
-  }
-
-  /**
-   * Shared implementation of the two forms of invokeVisitor.
-   *
-   * @param visitor         object whose visit method is to be invoked
-   * @param visitee         object to be passed as a parameter to the visit
-   *                        method
-   * @param hierarchyRoot   if non-null, visitor method will only be invoked if
-   *                        it takes a parameter whose type is a subtype of
-   *                        hierarchyRoot
-   * @param visitMethodName name of visit method, e.g. "visit"
-   * @return true if a matching visit method was found and invoked
-   */
-  private static boolean invokeVisitorInternal(
-      Object visitor,
-      Object visitee,
-      Class hierarchyRoot,
-      String visitMethodName) {
-    Class<?> visitorClass = visitor.getClass();
-    Class visiteeClass = visitee.getClass();
-    Method method =
-        lookupVisitMethod(
-            visitorClass,
-            visiteeClass,
-            visitMethodName);
-    if (method == null) {
-      return false;
-    }
-
-    if (hierarchyRoot != null) {
-      Class paramType = method.getParameterTypes()[0];
-      if (!hierarchyRoot.isAssignableFrom(paramType)) {
-        return false;
-      }
-    }
-
-    try {
-      method.invoke(
-          visitor,
-          visitee);
-    } catch (IllegalAccessException ex) {
-      throw new RuntimeException(ex);
-    } catch (InvocationTargetException ex) {
-      // visit methods aren't allowed to have throws clauses,
-      // so the only exceptions which should come
-      // to us are RuntimeExceptions and Errors
-      Util.throwIfUnchecked(ex.getTargetException());
-      throw new RuntimeException(ex.getTargetException());
-    }
-    return true;
-  }
-
-  /**
    * Looks up a visit method.
    *
    * @param visitorClass    class of object whose visit method is to be invoked
@@ -279,14 +200,16 @@ public abstract class ReflectUtilOrigin {
    * @param visitMethodName name of visit method
    * @return method found, or null if none found
    */
-  public static Method lookupVisitMethod(
+  public static CallSite lookupVisitMethod(
       Class<?> visitorClass,
       Class<?> visiteeClass,
-      String visitMethodName) {
+      String visitMethodName,
+      Class returnType) {
     return lookupVisitMethod(
         visitorClass,
         visiteeClass,
         visitMethodName,
+        returnType,
         Collections.emptyList());
   }
 
@@ -303,10 +226,11 @@ public abstract class ReflectUtilOrigin {
    * @return method found, or null if none found
    * @see #createDispatcher(Class, Class)
    */
-  public static Method lookupVisitMethod(
+  public static CallSite lookupVisitMethod(
       Class<?> visitorClass,
       Class<?> visiteeClass,
       String visitMethodName,
+      Class returnType,
       List<Class> additionalParameterTypes) {
     // Prepare an array to re-use in recursive calls.  The first argument
     // will have the visitee class substituted into it.
@@ -321,30 +245,32 @@ public abstract class ReflectUtilOrigin {
     // the original visiteeClass has a diamond-shaped interface inheritance
     // graph. (This is common, for example, in JMI.) The idea is to avoid
     // iterating over a single interface's method more than once in a call.
-    Map<Class<?>, Method> cache = new HashMap<>();
+    Map<Class<?>, CallSite> cache = new HashMap<>();
 
     return lookupVisitMethod(
         visitorClass,
         visiteeClass,
         visitMethodName,
+        returnType,
         paramTypes,
         cache);
   }
 
-  public static ThreadLocal<Method> BENCHMARK_THREADLOCAL = new ThreadLocal<>();
+  public static ThreadLocal<CallSite> BENCHMARK_THREADLOCAL = new ThreadLocal<>();
 
-  private static Method lookupVisitMethod(
+  private static CallSite lookupVisitMethod(
       final Class<?> visitorClass,
       final Class<?> visiteeClass,
       final String visitMethodName,
+      final Class returnType,
       final Class<?>[] paramTypes,
-      final Map<Class<?>, Method> cache) {
+      final Map<Class<?>, CallSite> cache) {
     // Use containsKey since the result for a Class might be null.
     if (cache.containsKey(visiteeClass)) {
       return cache.get(visiteeClass);
     }
 
-    Method candidateMethod = null;
+    CallSite candidateMethod = null;
 
     paramTypes[0] = visiteeClass;
 
@@ -352,16 +278,21 @@ public abstract class ReflectUtilOrigin {
       if (BENCHMARK_THREADLOCAL.get() != null) {
         candidateMethod = BENCHMARK_THREADLOCAL.get();
       } else {
-        candidateMethod =
-            visitorClass.getMethod(
-                visitMethodName,
-                paramTypes);
-      }
+        MethodType mt = MethodType.methodType(returnType, paramTypes);
+        MethodHandle methodHandle = MethodHandles.lookup().findVirtual(visitorClass, visitMethodName, mt);
 
+        candidateMethod = LambdaMetafactory.metafactory(MethodHandles.lookup(),
+            "apply",
+            MethodType.methodType(BiFunction.class),
+            MethodType.methodType(Object.class, Object.class, Object.class),
+            methodHandle,
+            MethodType.methodType(returnType, visitorClass, visiteeClass));
+      }
       cache.put(visiteeClass, candidateMethod);
 
       return candidateMethod;
-    } catch (NoSuchMethodException ex) {
+    } catch (Exception ex) {
+      ex.printStackTrace();
       // not found:  carry on with lookup
     }
 
@@ -372,14 +303,16 @@ public abstract class ReflectUtilOrigin {
               visitorClass,
               superClass,
               visitMethodName,
+              returnType,
               paramTypes,
               cache);
     }
 
     Class<?>[] interfaces = visiteeClass.getInterfaces();
     for (Class<?> anInterface : interfaces) {
-      final Method method = lookupVisitMethod(visitorClass, anInterface,
-          visitMethodName, paramTypes, cache);
+      final CallSite method = lookupVisitMethod(visitorClass, anInterface,
+          visitMethodName, returnType, paramTypes, cache);
+       /* skip checking...
       if (method != null) {
         if (candidateMethod != null) {
           if (!method.equals(candidateMethod)) {
@@ -402,6 +335,7 @@ public abstract class ReflectUtilOrigin {
         }
         candidateMethod = method;
       }
+        */
     }
 
     cache.put(visiteeClass, candidateMethod);
@@ -417,62 +351,56 @@ public abstract class ReflectUtilOrigin {
    * @param visiteeBaseClazz Visitee base class
    * @return cache of methods
    */
-  public static <R extends ReflectiveVisitor, E> ReflectiveVisitDispatcher<R, E> createDispatcher(
+  public static <R extends ReflectiveVisitor, E> ReflectiveVisitDispatcher3<R, E> createDispatcher(
       final Class<R> visitorBaseClazz,
       final Class<E> visiteeBaseClazz) {
     assert ReflectiveVisitor.class.isAssignableFrom(visitorBaseClazz);
     assert Object.class.isAssignableFrom(visiteeBaseClazz);
-    return new ReflectiveVisitDispatcher<R, E>() {
-      final Map<List<Object>, Method> map = new HashMap<>();
+    return new ReflectiveVisitDispatcher3<R, E>() {
+      final Map<List<Object>, CallSite> map = new HashMap<>();
 
-      public Method lookupVisitMethod(
+      public CallSite lookupVisitMethod(
           Class<? extends R> visitorClass,
           Class<? extends E> visiteeClass,
-          String visitMethodName) {
+          String visitMethodName,
+          Class returnType) {
         return lookupVisitMethod(
             visitorClass,
             visiteeClass,
             visitMethodName,
+            returnType,
             Collections.emptyList());
       }
 
-      public Method lookupVisitMethod(
+      public CallSite lookupVisitMethod(
           Class<? extends R> visitorClass,
           Class<? extends E> visiteeClass,
           String visitMethodName,
+          Class returnType,
           List<Class> additionalParameterTypes) {
         final List<Object> key =
             ImmutableList.of(
                 visitorClass,
                 visiteeClass,
                 visitMethodName,
+                returnType,
                 additionalParameterTypes);
-        Method method = map.get(key);
+        CallSite method = map.get(key);
         if (method == null) {
           if (map.containsKey(key)) {
             // We already looked for the method and found nothing.
           } else {
             method =
-                ReflectUtil.lookupVisitMethod(
+                ReflectUtilUsingLambdaFactory.lookupVisitMethod(
                     visitorClass,
                     visiteeClass,
                     visitMethodName,
+                    returnType,
                     additionalParameterTypes);
             map.put(key, method);
           }
         }
         return method;
-      }
-
-      public boolean invokeVisitor(
-          R visitor,
-          E visitee,
-          String visitMethodName) {
-        return ReflectUtil.invokeVisitor(
-            visitor,
-            visitee,
-            visiteeBaseClazz,
-            visitMethodName);
       }
     };
   }
@@ -515,36 +443,41 @@ public abstract class ReflectUtilOrigin {
       final Class<T> returnClazz,
       final ReflectiveVisitor visitor,
       final String methodName,
+      final Class returnType,
       final Class<E> arg0Clazz,
       final Class... otherArgClasses) {
     final List<Class> otherArgClassList =
         ImmutableList.copyOf(otherArgClasses);
     @SuppressWarnings({"unchecked" })
-    final ReflectiveVisitDispatcher<ReflectiveVisitor, E>
+    final ReflectiveVisitDispatcher3<ReflectiveVisitor, E>
         dispatcher =
         createDispatcher(
             (Class<ReflectiveVisitor>) visitor.getClass(), arg0Clazz);
     return new MethodDispatcher<T>() {
       public T invoke(Object... args) {
-        Method method = lookupMethod(args[0]);
+        CallSite method = lookupMethod(args[0]);
         try {
-          final Object o = method.invoke(visitor, args);
+          BiFunction func = (BiFunction) method.getTarget().invokeExact();
+          final Object o = func.apply(visitor, arg0Clazz.cast(args[0]));
+          // final Object o = method.invoke(visitor, arg0Clazz.cast(args[0]));
           return returnClazz.cast(o);
-        } catch (IllegalAccessException | InvocationTargetException e) {
+        } catch (Throwable e) {
+          e.printStackTrace();
           throw new RuntimeException("While invoking method '" + method + "'",
               e);
         }
       }
 
-      private Method lookupMethod(final Object arg0) {
+      private CallSite lookupMethod(final Object arg0) {
         if (!arg0Clazz.isInstance(arg0)) {
           throw new IllegalArgumentException();
         }
-        Method method =
+        CallSite method =
             dispatcher.lookupVisitMethod(
                 visitor.getClass(),
                 (Class<? extends E>) arg0.getClass(),
                 methodName,
+                returnType,
                 otherArgClassList);
         if (method == null) {
           List<Class> classList = new ArrayList<>();

@@ -252,6 +252,8 @@ public abstract class ReflectUtilUsingMethodHandle {
         cache);
   }
 
+  public static ThreadLocal<MethodHandle> BENCHMARK_THREADLOCAL = new ThreadLocal<>();
+
   private static MethodHandle lookupVisitMethod(
       final Class<?> visitorClass,
       final Class<?> visiteeClass,
@@ -269,8 +271,12 @@ public abstract class ReflectUtilUsingMethodHandle {
     paramTypes[0] = visiteeClass;
 
     try {
-      MethodType mt = MethodType.methodType(returnType, paramTypes);
-      candidateMethod = MethodHandles.lookup().findVirtual(visitorClass, visitMethodName, mt);
+      if (BENCHMARK_THREADLOCAL.get() != null) {
+        candidateMethod = BENCHMARK_THREADLOCAL.get();
+      } else {
+        MethodType mt = MethodType.methodType(returnType, paramTypes);
+        candidateMethod = MethodHandles.lookup().findVirtual(visitorClass, visitMethodName, mt);
+      }
       cache.put(visiteeClass, candidateMethod);
 
       return candidateMethod;
