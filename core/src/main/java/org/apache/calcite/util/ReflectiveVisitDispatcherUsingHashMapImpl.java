@@ -16,15 +16,17 @@
  */
 package org.apache.calcite.util;
 
-import org.apache.calcite.config.CalciteSystemProperty;
-
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 
+import org.apache.calcite.config.CalciteSystemProperty;
+
 import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Looking up methods relating to reflective visitation. Caching reflect
@@ -34,7 +36,7 @@ import java.util.List;
  * @param <E> Argument type
  * @param <R> Return type
  */
-public class ReflectiveVisitDispatcherImpl<R extends ReflectiveVisitor, E>
+public class ReflectiveVisitDispatcherUsingHashMapImpl<R extends ReflectiveVisitor, E>
     implements ReflectiveVisitDispatcher<R, E> {
 
   /**
@@ -52,11 +54,7 @@ public class ReflectiveVisitDispatcherImpl<R extends ReflectiveVisitor, E>
    * Solution 3) which introduces a controllable global small sized cache is a
    * better solution to balance memory usage and performance.
    */
-  private static final Cache<List<Object>, Method> GLOBAL_METHOD_CACHE =
-      CacheBuilder.newBuilder()
-          .softValues()
-          .maximumSize(CalciteSystemProperty.REFLECT_VISIT_DISPATCHER_METHOD_CACHE_MAX_SIZE.value())
-          .build();
+  private static final Map<List<Object>, Method> GLOBAL_METHOD_CACHE = new HashMap<>();
 
   /**
    * visitE class
@@ -68,7 +66,7 @@ public class ReflectiveVisitDispatcherImpl<R extends ReflectiveVisitor, E>
    *
    * @param visiteeBaseClazz visitee base class
    */
-  public ReflectiveVisitDispatcherImpl(Class<E> visiteeBaseClazz) {
+  public ReflectiveVisitDispatcherUsingHashMapImpl(Class<E> visiteeBaseClazz) {
     this.visiteeBaseClazz = visiteeBaseClazz;
   }
 
@@ -95,15 +93,7 @@ public class ReflectiveVisitDispatcherImpl<R extends ReflectiveVisitor, E>
             visitMethodName,
             additionalParameterTypes);
 
-    if (CalciteSystemProperty.REFLECT_VISIT_DISPATCHER_METHOD_CACHE_MAX_SIZE.value() == 0) {
-      return ReflectUtil.lookupVisitMethod(
-          visitorClass,
-          visiteeClass,
-          visitMethodName,
-          additionalParameterTypes);
-    }
-
-    Method method = GLOBAL_METHOD_CACHE.getIfPresent(key);
+    Method method = GLOBAL_METHOD_CACHE.get(key);
     if (method == null) {
       //  Maybe we already looked for the method but found nothing,
       //  which usually will not happen. Because Guava cache does

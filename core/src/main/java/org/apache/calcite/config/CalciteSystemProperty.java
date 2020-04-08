@@ -347,7 +347,7 @@ public final class CalciteSystemProperty<T> {
   public static final CalciteSystemProperty<Integer>
       REFLECT_VISIT_DISPATCHER_METHOD_CACHE_MAX_SIZE =
       intProperty("calcite.reflect.visit.dispatcher.method.cache.maxSize", 128,
-          v -> v > 0 && v <= 256);
+          v -> v >= 0 && v <= 256);
 
   private static CalciteSystemProperty<Boolean> booleanProperty(String key,
       boolean defaultValue) {
